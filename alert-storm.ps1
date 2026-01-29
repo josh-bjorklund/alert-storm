@@ -1,9 +1,8 @@
 <#
-Detection and alert resolver v0.1 - Josh Bjorklund
+Detection and alert resolver v2 - Josh Bjorklund
 
-How to use: Within the script, fill in environment information (console URL and site ID's), then after running, provide your API key and the file's hash. 
-
-This should clear both alerts and detections. Additionally, within user config, you can change the analyst verdict to what is desired. Defalut is false positive.
+How to use: Within the script, fill in environment information (console URL and site ID's), then after running, provide your API key and the file's hash.
+            Next, choose if you want to unquarantine the files, or not. 
 #>
 
 param(
@@ -18,7 +17,7 @@ param(
 
 # Management console base URL – NO trailing slash.
 # Example: "https://usea1-123.sentinelone.net"
-$Server = "https://XXXXXXX.sentinelone.net"
+$Server = "https://XXXXXXXXXXXX.sentinelone.net"
 
 # One or more Site IDs where you want to resolve threats.
 # Example: @("1234567890123456789")
@@ -59,6 +58,64 @@ function Get-HashFilterKeyForAlerts {
 
 $Headers = @{
     "Authorization" = "ApiToken $ApiToken"
+}
+
+# ============== UNQUARANTINE (OPTIONAL STEP) ===========
+
+function Unquarantine-ThreatsByHash {
+    param(
+        [string]$Hash
+    )
+
+    if (-not $SiteIds -or $SiteIds.Count -eq 0) {
+        throw "SiteIds is empty. Please configure at least one Site ID."
+    }
+
+    $endpoint = "$Server/web/api/v2.1/threats/mitigate/un-quarantine"
+
+    $totalUnquarantined = 0
+    $batch = 0
+
+    while ($true) {
+        $batch++
+
+        $body = @{
+            filter = @{
+                siteIds       = $SiteIds
+                limit         = $ThreatsBatchLimit
+                contentHashes = @($Hash)
+            }
+        } | ConvertTo-Json -Depth 5
+
+        Write-Host "[-] Unquarantine batch #${batch}: sending unquarantine for threats with hash $Hash ..." -ForegroundColor Yellow
+
+        try {
+            $response = Invoke-RestMethod -Uri $endpoint -Headers $Headers `
+                                          -Method Post -ContentType "application/json" `
+                                          -Body $body -ErrorAction Stop
+        }
+        catch {
+            Write-Error "Error sending unquarantine command: $($_.Exception.Message)"
+            break
+        }
+
+        $affected = 0
+        if ($response -and $response.data -and $response.data.affected -ne $null) {
+            $affected = [int]$response.data.affected
+        }
+
+        Write-Host "[+] Unquarantine batch #$batch affected (unquarantine commands sent): $affected"
+
+        $totalUnquarantined += $affected
+
+        if ($affected -lt $ThreatsBatchLimit -or $affected -eq 0) {
+            break
+        }
+
+        Start-Sleep -Seconds $BatchDelaySeconds
+    }
+
+    Write-Host "[=] Total threats with unquarantine command sent for hash ${Hash}: $totalUnquarantined" -ForegroundColor Green
 }
 
 # ================= THREATS (INCIDENTS) =================
@@ -188,11 +245,29 @@ function Resolve-CloudDetectionAlertsByHash {
 
 # ===================== MAIN ============================
 
-Write-Host "=== Resolving SentinelOne incidents and alerts for hash: $FileHash ===" -ForegroundColor Yellow
+Write-Host "=== SentinelOne hash workflow: $FileHash ===" -ForegroundColor Yellow
 Write-Host "Console: $Server"
 Write-Host "Sites:   $($SiteIds -join ', ')"
 Write-Host ""
 
+# BIG RED PROMPT: ASK ABOUT UNQUARANTINE
+Write-Host "**********************************************************************" -ForegroundColor Red
+Write-Host "WARNING: YOU ARE ABOUT TO RESOLVE THREATS & ALERTS FOR HASH: $FileHash" -ForegroundColor Red
+Write-Host "Additionally, you can also UNQUARANTINE any files associated with this" -ForegroundColor Red
+Write-Host "**********************************************************************" -ForegroundColor Red
+
+$unqChoice = Read-Host "Do you want to UNQUARANTINE associated files? (Y/N)"
+
+if ($unqChoice -match '^(Y|y)$') {
+    Write-Host ""
+    Write-Host ">>> Unquarantining files..." -ForegroundColor Yellow
+    Unquarantine-ThreatsByHash -Hash $FileHash
+} else {
+    Write-Host ""
+    Write-Host ">>> Skipping unquarantine. Proceeding directly to resolve incidents..." -ForegroundColor Yellow
+}
+
+Write-Host ""
 Resolve-ThreatIncidentsByHash -Hash $FileHash
 Write-Host ""
 Resolve-CloudDetectionAlertsByHash -Hash $FileHash
